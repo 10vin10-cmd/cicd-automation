@@ -26,7 +26,10 @@ class Thresholds:
     max_error_rate: float = 0.02         # 2% absolute
     max_error_rate_increase: float = 0.01  # +1 point over baseline
     max_p95_ms: float = 800
-    max_p95_regression: float = 1.5      # 50% slower than baseline
+    max_p95_regression: float = 1.5      # 50% slower than baseline...
+    min_p95_increase_ms: float = 100     # ...and at least this much slower: on
+                                         # millisecond latencies, jitter alone
+                                         # doubles p95
     min_requests: int = 20               # too little traffic proves nothing
 
 
@@ -49,7 +52,9 @@ def analyse(canary: Sample, baseline: Sample | None = None,
         if canary.error_rate - baseline.error_rate > limits.max_error_rate_increase:
             reasons.append(f"error rate up {canary.error_rate - baseline.error_rate:.1%} "
                            "over the current version")
-        if baseline.p95_ms > 0 and canary.p95_ms > baseline.p95_ms * limits.max_p95_regression:
+        slower_by = canary.p95_ms - baseline.p95_ms
+        if (baseline.p95_ms > 0 and canary.p95_ms > baseline.p95_ms * limits.max_p95_regression
+                and slower_by >= limits.min_p95_increase_ms):
             reasons.append(f"p95 {canary.p95_ms:.0f} ms vs {baseline.p95_ms:.0f} ms "
                            "for the current version")
     if reasons:

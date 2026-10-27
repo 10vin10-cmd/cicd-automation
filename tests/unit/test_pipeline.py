@@ -174,8 +174,13 @@ def test_error_spike_rolls_back():
 
 
 def test_latency_regression_rolls_back_even_under_the_absolute_limit():
-    v = analyse(Sample(50, 0, 300), Sample(50, 0, 100), Thresholds(max_p95_ms=800))
+    v = analyse(Sample(50, 0, 450), Sample(50, 0, 100), Thresholds(max_p95_ms=800))
     assert not v.promote and any("current version" in r for r in v.reasons)
+
+
+def test_millisecond_jitter_is_not_a_regression():
+    # 5 ms -> 9 ms is 80% slower but meaningless; it rolled back a healthy build in CI.
+    assert analyse(Sample(30, 0, 9), Sample(30, 0, 5)).promote
 
 
 def test_too_little_traffic_is_not_proof():
