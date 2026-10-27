@@ -1,0 +1,13 @@
+description: >
+  Payments adds a synchronous fraud-screening step that makes each charge take
+  about 2.5 s. Orders waits 1 s for payments, so checkouts time out with 504.
+mode: live
+faults: {payments: slow}
+changes:
+  payments:
+    - sha: 2c4e6a8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c
+      author: dev-payments
+      date: "2026-10-27T11:05:00+05:30"
+      subject: Screen charges with fraud service before capture
+      files: [services/payments/app.py]
+expect: {root_cause_service: payments, category: latency}

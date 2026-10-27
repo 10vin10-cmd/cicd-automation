@@ -1,0 +1,141 @@
+name: Release
+
+# main → images → staging (canary, automatic rollback) → production.
+#
+# Production uses the GitHub "production" environment: add required reviewers
+# to it (Settings → Environments) for a manual approval gate. It deploys to
+# Amazon ECS when the ECS_* variables and an AWS role are configured, and is
+# skipped with a note otherwise.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bad_build:
+        description: "Demo: ship a deliberately broken payments build to staging"
+        type: choice
+        default: none
+        options: [none, slow, schema_v2]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/cicd-automation
+
+jobs:
+  images:
+    name: Image ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [inventory, payments, orders]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push
+        run: |
+          IMAGE="${IMAGE_PREFIX,,}-${{ matrix.service }}:${{ github.sha }}"
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -f services/${{ matrix.service }}/Dockerfile -t "$IMAGE" services/
+          docker push "$IMAGE"
+          echo "Pushed \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
+
+  staging:
+    name: Deploy to staging
+    needs: images
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AUTOPILOT_LLM: ${{ vars.AUTOPILOT_LLM }}
+      AUTOPILOT_LLM_MODEL: ${{ vars.AUTOPILOT_LLM_MODEL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[services,anthropic]" pytest
+      - name: Current version running
+        run: autopilot stack up --evidence evidence
+      - name: Deploy in dependency order, with canary
+        run: >
+          autopilot deploy local --version ${{ github.sha }} --environment staging --evidence evidence
+          ${{ inputs.bad_build && inputs.bad_build != 'none' && format('--fault payments={0}', inputs.bad_build) || '' }}
+      - name: Post-deploy integration tests
+        run: autopilot test post-deploy tests/integration --kind integration --evidence evidence
+      - name: Stop services
+        if: always()
+        run: autopilot stack down --evidence evidence
+      - name: AWS credentials for Bedrock
+        if: failure() && vars.AUTOPILOT_LLM == 'bedrock' && vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+      - name: Root-cause diagnosis
+        if: failure()
+        run: >
+          autopilot diagnose --evidence evidence --out diagnosis.md
+          --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-staging
+          path: |
+            evidence/
+            diagnosis.md
+          retention-days: 14
+
+  production:
+    name: Deploy to production
+    needs: staging
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Production target
+        id: target
+        run: |
+          if [ -n "${{ vars.ECS_CLUSTER }}" ] && [ -n "${{ vars.AWS_ROLE_ARN }}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "No production target configured. Set ECS_CLUSTER and AWS_ROLE_ARN (and optionally ECS_ALARM_PREFIX) to deploy to Amazon ECS." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/setup-python@v5
+        if: steps.target.outputs.configured == 'true'
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - if: steps.target.outputs.configured == 'true'
+        run: pip install -e .
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.target.outputs.configured == 'true'
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+      - name: Deploy to ECS (dependencies first, stop on the first failure)
+        if: steps.target.outputs.configured == 'true'
+        run: |
+          for svc in inventory payments orders; do
+            autopilot deploy ecs --version "${{ github.sha }}" --evidence evidence \
+              --cluster "${{ vars.ECS_CLUSTER }}" --ecs-service "$svc" --container app \
+              --image "${IMAGE_PREFIX,,}-$svc:${{ github.sha }}" \
+              --alarm "${{ vars.ECS_ALARM_PREFIX }}$svc-5xx" --bake-seconds 300
+          done

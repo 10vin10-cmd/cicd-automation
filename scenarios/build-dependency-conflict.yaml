@@ -1,0 +1,15 @@
+description: >
+  A dependency bump pins starlette to a version fastapi doesn't support. The
+  payments build fails during dependency resolution. The build log is a real
+  pip run, recorded in recorded/build-dependency-conflict.
+mode: recorded
+stages:
+  - {name: build-payments, kind: build, status: failure, service: payments, log: build/payments.log}
+changes:
+  payments:
+    - sha: b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9
+      author: dependency-bot
+      date: "2026-10-27T08:00:00+05:30"
+      subject: Bump starlette to 0.47.0
+      files: [services/payments/requirements.txt]
+expect: {root_cause_service: payments, category: build_failure}

@@ -1,0 +1,14 @@
+description: >
+  A refactor in payments renames the `amount_cents` field to `amount`. Payments'
+  own tests still pass (they were updated with it), but orders still sends
+  `amount_cents`. Checkout integration tests fail with 502 from orders.
+mode: live
+faults: {payments: schema_v2}
+changes:
+  payments:
+    - sha: 4f9c2e1ab7d03c55e6a1f0b9c8d7e6f5a4b3c2d1
+      author: dev-payments
+      date: "2026-10-27T10:12:00+05:30"
+      subject: Rename amount_cents to amount in charge API
+      files: [services/payments/app.py, services/payments/tests/test_payments_app.py]
+expect: {root_cause_service: payments, category: code_regression}

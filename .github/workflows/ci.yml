@@ -1,0 +1,254 @@
+name: CI
+
+# Pull requests: test only what changed (plus its callers), diagnose any
+# failure with the root-cause agents, and merge automatically when policy
+# allows. Evidence from every job is uploaded and merged for the diagnosis.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+      impacted: ${{ steps.detect.outputs.impacted }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e .
+      - id: detect
+        run: autopilot changes --base "origin/${{ github.base_ref || 'main' }}" --write evidence/changes.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evidence-changes
+          path: evidence/
+          retention-days: 7
+
+  checks:
+    name: Lint and unit tests (autopilot)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: pytest tests/unit
+
+  build:
+    name: Build ${{ matrix.service }}
+    needs: changes
+    if: needs.changes.outputs.changed != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.changed) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e .
+      - name: Resolve dependencies and compile
+        id: build
+        run: |
+          set -o pipefail
+          mkdir -p evidence/build
+          {
+            echo "\$ python -m pip install -r services/${{ matrix.service }}/requirements.txt"
+            python -m venv /tmp/build-venv
+            /tmp/build-venv/bin/pip install -r services/${{ matrix.service }}/requirements.txt
+            python -m compileall -q services/${{ matrix.service }} services/shared
+          } 2>&1 | tee evidence/build/${{ matrix.service }}.log
+      - name: Container image
+        run: docker build -q -f services/${{ matrix.service }}/Dockerfile -t ${{ matrix.service }}:ci services/
+      - name: Record stage
+        if: always()
+        run: >
+          autopilot stage --evidence evidence --name build-${{ matrix.service }} --kind build
+          --service ${{ matrix.service }} --log build/${{ matrix.service }}.log
+          --status ${{ steps.build.outcome == 'success' && 'success' || 'failure' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-build-${{ matrix.service }}
+          path: evidence/
+          retention-days: 7
+
+  unit:
+    name: Unit tests ${{ matrix.service }}
+    needs: changes
+    if: needs.changes.outputs.changed != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.changed) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[services]" pytest
+      - run: >
+          autopilot test unit-${{ matrix.service }} services/${{ matrix.service }}
+          --kind unit --service ${{ matrix.service }} --evidence evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-unit-${{ matrix.service }}
+          path: evidence/
+          retention-days: 7
+
+  integration:
+    name: Integration tests
+    needs: [changes, build]
+    if: needs.changes.outputs.impacted != '[]' && !cancelled() && needs.build.result != 'failure'
+    runs-on: ubuntu-latest
+    outputs:
+      flaky: ${{ steps.test.outputs.flaky }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[services]" pytest
+      - name: Start services
+        run: autopilot stack up --evidence evidence || true   # a crash is evidence, not an abort
+      - id: test
+        run: autopilot test integration tests/integration --kind integration --evidence evidence
+      - name: Stop services
+        if: always()
+        run: autopilot stack down --evidence evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-integration
+          path: evidence/
+          retention-days: 7
+
+  diagnose:
+    name: Root-cause diagnosis
+    needs: [changes, build, unit, integration]
+    if: ${{ !cancelled() && (contains(needs.*.result, 'failure') || needs.integration.outputs.flaky == 'true') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write   # Bedrock via OIDC, when configured
+    env:
+      AUTOPILOT_LLM: ${{ vars.AUTOPILOT_LLM }}
+      AUTOPILOT_LLM_MODEL: ${{ vars.AUTOPILOT_LLM_MODEL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[anthropic]"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: evidence-*
+          path: evidence
+          merge-multiple: true
+      - name: AWS credentials for Bedrock
+        if: vars.AUTOPILOT_LLM == 'bedrock' && vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+      - name: Diagnose
+        run: >
+          autopilot diagnose --evidence evidence --out diagnosis.md --json diagnosis.json
+          --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - name: Comment on the pull request
+        if: github.event_name == 'pull_request'
+        continue-on-error: true   # forks get a read-only token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr comment ${{ github.event.pull_request.number }} --body-file diagnosis.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diagnosis
+          path: diagnosis.*
+
+  agent-eval:
+    name: Agent evaluation (fault scenarios)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: autopilot scenario eval --offline --evidence .scenarios --examples reports
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-eval-reports
+          path: reports/
+
+  automerge:
+    name: Auto-merge
+    needs: [changes, checks, build, unit, integration, agent-eval]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e .
+      - id: policy
+        name: Merge policy
+        run: |
+          to_check() { case "$1" in success) echo success;; skipped) echo skipped;; *) echo failure;; esac; }
+          CHECKS=$(jq -n \
+            --arg checks "$(to_check '${{ needs.checks.result }}')" \
+            --arg build "$(to_check '${{ needs.build.result }}')" \
+            --arg unit "$(to_check '${{ needs.unit.result }}')" \
+            --arg integration "$(to_check '${{ needs.integration.result }}')" \
+            --arg eval "$(to_check '${{ needs.agent-eval.result }}')" \
+            '{checks: $checks, build: $build, unit: $unit, integration: $integration, "agent-eval": $eval}')
+          autopilot merge-check --pr ${{ github.event.pull_request.number }} --checks "$CHECKS"
+      - name: Merge
+        if: steps.policy.outputs.action == 'merge'
+        run: gh pr merge ${{ github.event.pull_request.number }} --squash --delete-branch
+      - name: Start the release
+        # Merges made with GITHUB_TOKEN don't trigger push workflows, so the
+        # release is started explicitly.
+        if: steps.policy.outputs.action == 'merge'
+        run: gh workflow run release.yml --ref ${{ github.event.repository.default_branch }}

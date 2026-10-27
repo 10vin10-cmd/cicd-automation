@@ -1,0 +1,8 @@
+description: >
+  Orders rejects the first request after start-up while it warms up. Whichever
+  integration test runs first fails, then passes on retry. Nothing changed:
+  the agent should call it a flake and name the race, not blame a commit.
+mode: live
+faults: {orders: flaky_warmup}
+changes: {}
+expect: {root_cause_service: orders, category: flaky_test}

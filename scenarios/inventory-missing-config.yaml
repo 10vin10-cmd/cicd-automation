@@ -1,0 +1,14 @@
+description: >
+  Inventory now reads its database URL from the environment, but the setting
+  was never added to the deployment. Inventory crashes on start-up; orders
+  can't reach it, and every checkout fails with 503.
+mode: live
+withhold: {inventory: [INVENTORY_DB_URL]}
+changes:
+  inventory:
+    - sha: 9a1b7c3d5e7f9a1b3c5d7e9f1a3b5c7d9e1f3a5b
+      author: dev-fulfilment
+      date: "2026-10-27T09:40:00+05:30"
+      subject: Read database URL from INVENTORY_DB_URL
+      files: [services/inventory/app.py]
+expect: {root_cause_service: inventory, category: config_error}

@@ -1,0 +1,56 @@
+[project]
+name = "cicd-automation"
+version = "1.0.0"
+description = "CI/CD automation with agentic root-cause diagnosis: auto-merge, build, test, deploy with canary and rollback, and agents that explain failures across services"
+requires-python = ">=3.12"
+dependencies = [
+  "pyyaml>=6",
+  "httpx>=0.27,<1",
+  "boto3>=1.34",
+]
+
+[project.optional-dependencies]
+services = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "opentelemetry-sdk>=1.30,<2",
+  "opentelemetry-instrumentation-fastapi>=0.51b0",
+  "opentelemetry-instrumentation-httpx>=0.51b0",
+]
+anthropic = ["anthropic>=0.40"]
+dev = [
+  "cicd-automation[services,anthropic]",
+  "pytest>=8",
+  "ruff>=0.6",
+]
+
+[project.scripts]
+autopilot = "autopilot.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["autopilot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "services"]
+addopts = "-q -p no:cacheprovider"
+markers = [
+  "integration: needs the local stack running (autopilot stack up)",
+  "scenario: reproduces a fault end to end; slow",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = [".scenarios", "evidence"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["autopilot", "shared", "orders", "payments", "inventory"]

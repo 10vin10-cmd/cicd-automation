@@ -1,0 +1,23 @@
+# Service registry: the single source of truth for what exists, where its code
+# lives, where it listens, and what it calls. Change detection, impact
+# analysis, the local stack and the root-cause agents all read this file.
+services:
+  orders:
+    path: services/orders
+    port: 8101
+    depends_on: [inventory, payments]
+    owner: team-checkout
+  inventory:
+    path: services/inventory
+    port: 8102
+    depends_on: []
+    owner: team-fulfilment
+  payments:
+    path: services/payments
+    port: 8103
+    depends_on: []
+    owner: team-payments
+
+# Code shared by every service: a change here affects all of them.
+shared_paths:
+  - services/shared

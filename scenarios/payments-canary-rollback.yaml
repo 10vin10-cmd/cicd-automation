@@ -1,0 +1,14 @@
+description: >
+  Integration tests passed against the old version, then the new payments
+  build is deployed to staging. Under canary traffic it responds too slowly,
+  the canary fails, and the deployment is rolled back automatically.
+mode: deploy
+deploy: {service: payments, version: v2.4.0, fault: slow}
+changes:
+  payments:
+    - sha: 7e5d3c1b9a7f5e3d1c9b7a5f3e1d9c7b5a3f1e9d
+      author: dev-payments
+      date: "2026-10-27T12:30:00+05:30"
+      subject: Call ledger synchronously when capturing a charge
+      files: [services/payments/app.py]
+expect: {root_cause_service: payments, category: latency}
