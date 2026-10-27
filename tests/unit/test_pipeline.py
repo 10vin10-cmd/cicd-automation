@@ -84,6 +84,17 @@ def test_detect_reads_commits_per_service(tmp_path):
     assert cs.commits["payments"][0].files == ["services/payments/app.py"]
 
 
+def test_missing_base_means_everything_changed(tmp_path):
+    _git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "services" / "orders").mkdir(parents=True)
+    (tmp_path / "services/orders/app.py").write_text("v1\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "first")
+    cs = detect("0" * 40, "HEAD", REGISTRY, cwd=tmp_path)
+    assert cs.changed_services == ["orders"]
+    assert [c.subject for c in cs.commits["orders"]] == []  # base is the root commit
+
+
 # -- merge policy ------------------------------------------------------------------
 
 CHECKS = {"build": "success", "unit": "success", "integration": "success"}

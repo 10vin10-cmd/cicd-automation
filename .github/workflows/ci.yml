@@ -6,6 +6,8 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -35,7 +37,10 @@ jobs:
           cache: pip
       - run: pip install -e .
       - id: detect
-        run: autopilot changes --base "origin/${{ github.base_ref || 'main' }}" --write evidence/changes.json
+        # PRs: compare with the target branch. Pushes: with the previous commit.
+        run: >
+          autopilot changes --write evidence/changes.json --base
+          "${{ github.event_name == 'push' && github.event.before || format('origin/{0}', github.base_ref || 'main') }}"
       - uses: actions/upload-artifact@v4
         with:
           name: evidence-changes

@@ -64,7 +64,13 @@ def impacted(changed: set[str], registry: Registry) -> set[str]:
 def detect(base: str, head: str = "HEAD", registry: Registry | None = None,
            cwd=ROOT) -> ChangeSet:
     registry = registry or Registry.load()
-    files = _git(cwd, "diff", "--name-only", f"{base}...{head}").split()
+    if _resolves(cwd, base):
+        files = _git(cwd, "diff", "--name-only", f"{base}...{head}").split()
+    else:
+        # No usable base (first push to a branch, or history not fetched):
+        # treat everything as changed rather than silently testing nothing.
+        files = _git(cwd, "ls-files").split()
+        base = _git(cwd, "rev-list", "--max-parents=0", head).split()[0]
     changed, shared, other = classify(files, registry)
     commits = {svc: _commits(cwd, base, head, registry[svc].path) for svc in sorted(changed)}
     if shared:
@@ -100,6 +106,13 @@ def _dedupe(commits: list[Commit]) -> list[Commit]:
     for c in commits:
         seen.setdefault(c.sha, c)
     return sorted(seen.values(), key=lambda c: c.date, reverse=True)
+
+
+def _resolves(cwd, ref: str) -> bool:
+    if not ref or set(ref) == {"0"}:
+        return False
+    return subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                          cwd=cwd, capture_output=True).returncode == 0
 
 
 def _git(cwd, *args: str) -> str:
